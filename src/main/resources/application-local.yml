@@ -1,0 +1,7 @@
+# Local/Load-test profile configuration
+# Activates with: --spring.profiles.active=local
+# Used for load testing with WireMock (no authentication required)
+
+service:
+  token:
+    enabled: false

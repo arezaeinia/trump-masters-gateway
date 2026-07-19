@@ -1,0 +1,67 @@
+# Local load-test stack.
+# Starts: Redis + WireMock mock backend + the gateway itself.
+# Locust runs on your host machine (not in Docker) so it can open many sockets.
+#
+# Usage:
+#   docker compose -f load-test/docker-compose.local.yml up -d
+#   locust -f load-test/locustfile.py --host ws://localhost:8080
+#
+# WireMock admin UI: http://localhost:9090/__admin/
+#
+# Stop:
+#   docker compose -f load-test/docker-compose.local.yml down
+
+services:
+
+  redis:
+    image: redis:7.0-alpine
+    command: redis-server --loglevel warning
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mock-backend:
+    # WireMock mock — serves stub responses from src/test/resources/wiremock/mappings/*.json.
+    # Reuses the same mappings as integration tests (no duplication).
+    # Does NOT publish Redis events; server-push path is not exercised locally.
+    # Admin UI at http://localhost:9090/__admin/ for inspecting/adding stubs.
+    image: wiremock/wiremock:3.13.0
+    command: --port 8080 --global-response-templating
+    volumes:
+      - ../src/test/resources/wiremock:/home/wiremock
+    ports:
+      - "9090:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/__admin/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      BACKEND_BASE_URL: "http://mock-backend:8080"
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ""
+      LOGGING_LEVEL_COM_ARNIA: DEBUG
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/liveness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s

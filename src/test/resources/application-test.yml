@@ -1,0 +1,21 @@
+service:
+  token:
+    enabled: false
+    keycloak-url: http://localhost:8080
+    username: test-user
+    password: test-password
+    client: test-client
+
+backend:
+  base-url: http://localhost:8080
+
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: ""
+
+clients:
+  loki:
+    url: http://localhost:3100

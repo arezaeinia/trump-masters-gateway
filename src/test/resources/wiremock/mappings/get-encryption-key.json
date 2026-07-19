@@ -1,0 +1,14 @@
+{
+  "name": "Get Game Encryption Key",
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/api/games/([0-9]+)"
+  },
+  "response": {
+    "status": 200,
+    "bodyFileName": "encryption-key-response.json",
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  }
+}

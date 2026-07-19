@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  gateway:
+    image: ${GATEWAY_DOCKER_NAME}
+    environment:
+      SPRING_DATA_REDIS_HOST: ${MIPOLI_REDIS_HOST}
+      SPRING_DATA_REDIS_PORT: ${MIPOLI_REDIS_EXPOSE_PORT}
+      SPRING_DATA_REDIS_PASSWORD: ${MIPOLI_REDIS_PASSWD}
+      KEYCLOAK_URL: ${MIPOLI_KEYCLOAK_URL}
+      SERVICE_TOKEN_USERNAME: ${MIPOLI_SERVICE_TOKEN_USERNAME}
+      SERVICE_TOKEN_PASSWORD: ${MIPOLI_SERVICE_TOKEN_PASSWORD}
+      SERVICE_TOKEN_CLIENT: ${MIPOLI_SERVICE_TOKEN_CLIENT}
+      SPRING_PROFILES_ACTIVE: ${MIPOLI_SPRING_PROFILES_ACTIVE}
+      LOGGING_LEVEL_COM_ARNIA: ${MIPOLI_LOG_LEVEL}
+      DEPLOYMENT_HOST: "{{.Node.Hostname}}"
+      LOKI_URL: https://loki.baltazargame.ir
+    networks:
+      - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 2
+      update_config:
+        parallelism: 1  # Swarm updates 1 container at a time (Prevents total outage)
+        order: start-first # New container is started before the old one is stopped
+        delay: 30s # Wait 30 seconds before updating the next replica
+        failure_action: continue
+      labels:
+        - traefik.enable=true
+        # Route WebSocket traffic to this service
+        - traefik.http.routers.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.rule=Host(`${MIPOLI_SERVICE_DOMAIN}`) && PathPrefix(`/ws`)
+        - traefik.http.routers.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.priority=100
+        - traefik.http.routers.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.entrypoints=websecure
+        - traefik.http.routers.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.tls=true
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.server.port=8080
+        # Sticky sessions — required so all WS frames from one client hit the same
+        # gateway instance (same SessionRegistry / EncryptionKeyCache)
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.sticky.cookie=true
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.sticky.cookie.name=GATEWAY_SESSION
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.sticky.cookie.secure=true
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.passhostheader=true
+        # Tell Traefik to actively check health of the instances:
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.healthcheck.path=/actuator/health/readiness
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.healthcheck.interval=10s
+        - traefik.http.services.${CI_PROJECT_NAME}-${CI_ENVIRONMENT_NAME}.loadbalancer.healthcheck.timeout=5s
+        # Prometheus scraping
+        - prometheus.enable=true
+        - prometheus.port=8080
+        - prometheus.path=/actuator/prometheus
+        - prometheus-job=spring-actuator
+        - observability.environment=${CI_ENVIRONMENT_NAME}
+        - observability.service.name=${CI_PROJECT_NAME}
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health/liveness"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+networks:
+  traefik-public:
+    external: true

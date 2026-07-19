@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <property name="LOG_HOME" value="logs"/>
+    <springProperty scope="context" name="APPLICATION_NAME" source="spring.application.name"/>
+    <springProperty scope="context" name="LOKI_URL" source="clients.loki.url"/>
+    <springProperty scope="context" name="ACTIVE_PROFILE" source="spring.profiles.active"/>
+    <springProperty scope="context" name="HOST" source="deployment.host"/>
+
+    <appender name="MainRollingFile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <append>true</append>
+        <file>logs/main.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- Combined time + size based rolling (Logback 1.3+/1.5+ style) -->
+            <fileNamePattern>logs/main-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>20MB</maxFileSize>
+            <maxHistory>15</maxHistory>
+            <!-- Optional total size cap to avoid unbounded disk usage; adjust if desired -->
+            <totalSizeCap>2GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d [%thread] %-5level %logger{36} - %L - %m%n</pattern>
+        </encoder>
+    </appender>
+    <appender name="StatRollingFile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <append>true</append>
+        <file>logs/stat/stat.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/stat/stat-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>20MB</maxFileSize>
+            <maxHistory>5</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d [%thread] %-5level %logger{36} - %L - %m%n</pattern>
+            <!--USE IN LOG PARSER  %d [[ACTIVE]%thread] %-5level %logger{36} - %L - %m%n-->
+        </encoder>
+    </appender>
+    <appender name="LOKI" class="com.github.loki4j.logback.Loki4jAppender">
+        <http>
+            <url>${LOKI_URL}/loki/api/v1/push</url>
+        </http>
+        <format>
+            <label>
+                <pattern>
+                    service=${APPLICATION_NAME},
+                    host=${HOST},
+                    environment=${ACTIVE_PROFILE},
+                    level=%level
+                </pattern>
+            </label>
+            <message>
+                <pattern>level=%level logger=%logger{20} t=%thread | %msg %ex</pattern>
+            </message>
+        </format>
+    </appender>
+    <appender name="CoalescingStatistics" class="org.perf4j.logback.AsyncCoalescingStatisticsAppender">
+        <param name="TimeSlice" value="60000"/>
+        <param name="QueueSize" value="1000"/>
+        <appender-ref ref="StatRollingFile"/>
+    </appender>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+
+    <logger name="org.apache.kafka" level="INFO"/>
+    <logger name="org.springframework.kafka" level="INFO"/>
+    <logger name="org.perf4j.TimingLogger" level="INFO" additivity="false">
+        <appender-ref ref="CoalescingStatistics"/>
+    </logger>
+
+    <springProfile name="staging, staging-en, production">
+        <logger name="com.arnia" additivity="false">
+            <level value="TRACE"/>
+            <appender-ref ref="LOKI"/>
+        </logger>
+        <root level="ERROR">
+            <appender-ref ref="LOKI"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="dev||test||local">
+        <logger name="com.arnia" additivity="false">
+            <level value="TRACE"/>
+            <appender-ref ref="STDOUT"/>
+        </logger>
+        <root level="ERROR">
+            <appender-ref ref="STDOUT"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!staging &amp; !staging-en &amp; !dev &amp; !test &amp; !local">
+        <logger name="com.arnia" additivity="false">
+            <level value="TRACE"/>
+            <appender-ref ref="MainRollingFile"/>
+        </logger>
+        <root level="ERROR">
+            <appender-ref ref="MainRollingFile"/>
+        </root>
+    </springProfile>
+</configuration>
