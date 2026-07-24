@@ -16,7 +16,7 @@ class RedisConfig {
     ): ReactiveRedisMessageListenerContainer {
         val container = ReactiveRedisMessageListenerContainer(connectionFactory)
         container
-            .receive(PatternTopic.of("/topic/public/*"))
+            .receive(PatternTopic.of("/topic/game/*"))
             .doOnNext(publicChannelSubscriber::onMessage)
             .doOnError(publicChannelSubscriber::onError)
             .subscribe()

@@ -31,7 +31,7 @@ spring:
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD}
   redis:
-    subscribe-pattern: /topic/public/*
+    subscribe-pattern: /topic/game/*
 
 loki-url: ${LOKI_URL:http://localhost:3100}
 
