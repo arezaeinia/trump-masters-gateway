@@ -34,6 +34,15 @@ class WebSocketGatewayHandler(
 ) : WebSocketHandler {
     private val log = LoggerFactory.getLogger(javaClass)
 
+    /**
+     * Advertise the `bearer` sub-protocol so the WebFlux handshake echoes it back in the 101
+     * `Sec-WebSocket-Protocol` header. Browser clients open with `protocols: ['bearer', <token>]`
+     * (they can't set the `Authorization` handshake header); without a matching advertised protocol
+     * the server selects none, and Chrome aborts the connection. `HandshakeWebSocketService` selects
+     * the first requested protocol contained in this list — `bearer` — and ignores the token entry.
+     */
+    override fun getSubProtocols(): List<String> = listOf(BEARER_SUBPROTOCOL)
+
     override fun handle(session: WebSocketSession): Mono<Void> {
         val sink = Sinks.many().unicast().onBackpressureBuffer<String>()
 
@@ -107,7 +116,7 @@ class WebSocketGatewayHandler(
             return Mono.empty()
         }
 
-        val authHeader = session.handshakeInfo.headers.getFirst(HttpHeaders.AUTHORIZATION)
+        val authHeader = resolveAuthHeader(session)
         return commandRouter
             .route(command, authHeader)
             .doOnNext { error -> pushError(sink, session, error) }
@@ -138,10 +147,38 @@ class WebSocketGatewayHandler(
         sink.tryEmitNext(StompParser.serialise(frame))
     }
 
+    /**
+     * Resolve the bearer credential for a session as an `Authorization: Bearer <token>` header value.
+     *
+     * Native/mobile clients set the `Authorization` handshake header directly. Browser clients can't,
+     * so they pass the token as the second `Sec-WebSocket-Protocol` entry (`['bearer', <token>]`); we
+     * recover it from the original handshake request headers and reconstruct the `Bearer` header for
+     * the backend. Returns null if neither is present.
+     */
+    private fun resolveAuthHeader(session: WebSocketSession): String? {
+        session.handshakeInfo.headers
+            .getFirst(HttpHeaders.AUTHORIZATION)
+            ?.let { return it }
+
+        val requested =
+            session.handshakeInfo.headers
+                .getFirst(SEC_WEBSOCKET_PROTOCOL)
+                ?.split(',')
+                ?.map { it.trim() }
+                ?: return null
+        // Layout is [bearer, <token>]; take the entry after the marker, ignoring the echoed marker itself.
+        val markerIndex = requested.indexOf(BEARER_SUBPROTOCOL)
+        if (markerIndex < 0) return null
+        val token = requested.getOrNull(markerIndex + 1)
+        return token?.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
+    }
+
     /** Extract the gameId from a topic destination like `/topic/game/42`. */
     private fun gameIdFromTopic(destination: String): Int? = destination.substringAfterLast('/').toIntOrNull()
 
     private companion object {
         const val PRIVATE_DESTINATION = "/user/queue/errors"
+        const val BEARER_SUBPROTOCOL = "bearer"
+        const val SEC_WEBSOCKET_PROTOCOL = "Sec-WebSocket-Protocol"
     }
 }
