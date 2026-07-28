@@ -82,12 +82,22 @@
         </root>
     </springProfile>
 
-    <springProfile name="dev||test||local">
+    <springProfile name="dev||test">
         <logger name="com.arnia" additivity="false">
             <level value="TRACE"/>
             <appender-ref ref="STDOUT"/>
         </logger>
         <root level="ERROR">
+            <appender-ref ref="STDOUT"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="local">
+        <logger name="com.arnia" additivity="false">
+            <level value="TRACE"/>
+            <appender-ref ref="STDOUT"/>
+        </logger>
+        <root level="INFO">
             <appender-ref ref="STDOUT"/>
         </root>
     </springProfile>
