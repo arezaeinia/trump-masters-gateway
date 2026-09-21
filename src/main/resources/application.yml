@@ -1,5 +1,5 @@
 backend:
-  base-url: ${http://localhost:8080}
+  base-url: ${BACKEND_BASE_URL:http://localhost:8080}
 
   timeout-seconds: 15
   connection-pool:
@@ -31,7 +31,7 @@ spring:
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD}
   redis:
-    subscribe-pattern: /topic/public/*
+    subscribe-pattern: /topic/game/*
 
 loki-url: ${LOKI_URL:http://localhost:3100}
 

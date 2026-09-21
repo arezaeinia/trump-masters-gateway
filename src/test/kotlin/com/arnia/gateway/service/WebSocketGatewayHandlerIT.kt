@@ -2,44 +2,39 @@ package com.arnia.gateway.service
 
 import com.arnia.gateway.config.RedisTestContainerConfig
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.github.tomakehurst.wiremock.client.WireMock.aResponse
 import com.github.tomakehurst.wiremock.client.WireMock.equalTo
-import com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath
+import com.github.tomakehurst.wiremock.client.WireMock.post
 import com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor
 import com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo
-import com.github.tomakehurst.wiremock.client.WireMock.urlMatching
+import com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.server.LocalServerPort
 import org.springframework.context.annotation.Import
+import org.springframework.http.HttpHeaders
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.springframework.web.reactive.socket.WebSocketMessage
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient
 import reactor.core.publisher.Flux
+import reactor.netty.http.client.WebsocketClientSpec
 import java.net.URI
 import java.time.Duration
-import java.util.Base64
-import javax.crypto.Cipher
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.DESedeKeySpec
 
 /**
- * REAL end-to-end integration test:
- * Client WebSocket → Gateway STOMP handler → Decrypt → Backend API
+ * End-to-end: client WebSocket → gateway STOMP handler → command router → backend REST (WireMock).
  *
- * This test verifies:
- * 1. WebSocket connection works
- * 2. STOMP protocol is handled correctly (raw STOMP, no SockJS)
- * 3. Encryption/decryption works
- * 4. Gateway calls backend with correct data
- *
- * We DON'T wait for Redis responses (that would timeout).
- * We just verify the backend API was called correctly.
+ * Verifies the new plain-JSON protocol (no encryption): a `COMMAND` in the STOMP `SEND` body is routed
+ * to the right backend endpoint with the right body, and a backend Problem Detail comes back to the
+ * commanding client as a private `COMMAND_ERROR` MESSAGE frame (not a connection-closing STOMP ERROR).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(RedisTestContainerConfig::class)
@@ -50,7 +45,6 @@ class WebSocketGatewayHandlerIT {
 
     private val wsClient = ReactorNettyWebSocketClient()
     private val mapper = ObjectMapper()
-    private val testEncryptionKey = "012345678901234567890123".toByteArray()
 
     companion object {
         @JvmField
@@ -58,12 +52,8 @@ class WebSocketGatewayHandlerIT {
         val wireMock: WireMockExtension =
             WireMockExtension
                 .newInstance()
-                .options(
-                    WireMockConfiguration
-                        .wireMockConfig()
-                        .usingFilesUnderDirectory("src/test/resources/wiremock")
-                        .dynamicPort(),
-                ).build()
+                .options(WireMockConfiguration.wireMockConfig().dynamicPort())
+                .build()
 
         @JvmStatic
         @DynamicPropertySource
@@ -72,209 +62,160 @@ class WebSocketGatewayHandlerIT {
         }
     }
 
+    @BeforeEach
+    fun resetStubs() = wireMock.resetAll()
+
     @Test
-    fun `WebSocket client sends MOVE_CONFIRM and gateway calls backend correctly`() {
-        val gameId = 100
-        val moveIndex = 5
-        val userId = 42
-        val authToken = "Bearer test-token"
+    fun `PLAY_CARD command is routed to the plays endpoint with the payload body`() {
+        val gameId = 7
+        val roundNumber = 3
+        wireMock.stubFor(
+            post(urlPathEqualTo("/api/games/$gameId/rounds/$roundNumber/plays"))
+                .willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody("{}")),
+        )
 
-        // WireMock mappings are loaded automatically from src/test/resources/wiremock/
-
-        // Create game message
-        val gameMessage =
+        val command =
             mapOf(
-                "type" to "MOVE_CONFIRM",
+                "kind" to "COMMAND",
+                "correlationId" to "c-1",
+                "type" to "PLAY_CARD",
                 "gameId" to gameId,
-                "senderUserId" to userId,
-                "moveDto" to
-                    mapOf(
-                        "indices" to intArrayOf(0, 1, 2),
-                        "moveIndex" to moveIndex,
-                        "ai" to false,
-                    ),
+                "roundNumber" to roundNumber,
+                "payload" to mapOf("userId" to 31, "card" to "HEARTS_10"),
             )
+        sendCommand(gameId, command, expectFrames = 1)
+        Thread.sleep(300)
 
-        // Encrypt (like client does)
-        val encryptedData = encrypt(mapper.writeValueAsString(gameMessage))
+        wireMock.verify(
+            postRequestedFor(urlEqualTo("/api/games/$gameId/rounds/$roundNumber/plays"))
+                .withHeader("X-Gateway-Request", equalTo("true"))
+                .withRequestBody(matchingJsonPath("$.userId", equalTo("31")))
+                .withRequestBody(matchingJsonPath("$.card", equalTo("HEARTS_10"))),
+        )
+    }
 
-        // Outer envelope
-        val outerMessage =
+    @Test
+    fun `DECLARE_TRUMP command is routed to the trump endpoint`() {
+        val gameId = 8
+        val roundNumber = 2
+        wireMock.stubFor(
+            post(urlPathEqualTo("/api/games/$gameId/rounds/$roundNumber/trump"))
+                .willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody("{}")),
+        )
+
+        val command =
             mapOf(
+                "kind" to "COMMAND",
+                "type" to "DECLARE_TRUMP",
                 "gameId" to gameId,
-                "encryptedData" to encryptedData,
+                "roundNumber" to roundNumber,
+                "payload" to mapOf("userId" to 12, "trumpSuit" to "SPADES"),
             )
+        sendCommand(gameId, command, expectFrames = 1)
+        Thread.sleep(300)
 
-        // Create raw STOMP frames (matching Unity client behavior - no SockJS)
-        val connectFrame = "CONNECT\naccept-version:1.1\nheart-beat:10000,10000\n\n\u0000"
-        val sendFrame =
-            "SEND\ndestination:/app/game.sendMessage\n" +
-                "content-type:application/json;charset=UTF-8\n\n" +
-                "${mapper.writeValueAsString(outerMessage)}\u0000"
+        wireMock.verify(
+            postRequestedFor(urlEqualTo("/api/games/$gameId/rounds/$roundNumber/trump"))
+                .withRequestBody(matchingJsonPath("$.userId", equalTo("12")))
+                .withRequestBody(matchingJsonPath("$.trumpSuit", equalTo("SPADES"))),
+        )
+    }
 
-        // Connect to gateway WebSocket
+    @Test
+    fun `browser client passes its token via the bearer sub-protocol and it reaches the backend`() {
+        val gameId = 11
+        val roundNumber = 4
+        val token = "browser-jwt-xyz"
+        wireMock.stubFor(
+            post(urlPathEqualTo("/api/games/$gameId/rounds/$roundNumber/plays"))
+                .willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody("{}")),
+        )
+
+        val command =
+            mapOf(
+                "kind" to "COMMAND",
+                "type" to "PLAY_CARD",
+                "gameId" to gameId,
+                "roundNumber" to roundNumber,
+                "payload" to mapOf("userId" to 5, "card" to "CLUBS_9"),
+            )
+        // Browser style: no Authorization handshake header. `new WebSocket(url, ['bearer', token])`
+        // sends the token as a requested sub-protocol; the reactor-netty client models this via
+        // WebsocketClientSpec.protocols, so it also validates that the server echoes one back.
+        val browserClient =
+            ReactorNettyWebSocketClient(
+                reactor.netty.http.client.HttpClient.create(),
+            ) { WebsocketClientSpec.builder().protocols("bearer,$token") }
+        sendCommand(gameId, command, expectFrames = 1, client = browserClient)
+        Thread.sleep(300)
+
+        wireMock.verify(
+            postRequestedFor(urlEqualTo("/api/games/$gameId/rounds/$roundNumber/plays"))
+                .withHeader(HttpHeaders.AUTHORIZATION, equalTo("Bearer $token")),
+        )
+    }
+
+    @Test
+    fun `a backend Problem Detail comes back as a private COMMAND_ERROR MESSAGE frame`() {
+        val gameId = 9
+        val roundNumber = 1
+        val problem =
+            """{"type":"https://api.trump-masters.arnia.com/errors/not-player-turn",
+               "title":"Not player's turn","status":403,"detail":"It is not seat 2's turn"}"""
+        wireMock.stubFor(
+            post(urlPathEqualTo("/api/games/$gameId/rounds/$roundNumber/plays"))
+                .willReturn(aResponse().withStatus(403).withHeader("Content-Type", "application/problem+json").withBody(problem)),
+        )
+
+        val command =
+            mapOf(
+                "kind" to "COMMAND",
+                "correlationId" to "c-42",
+                "type" to "PLAY_CARD",
+                "gameId" to gameId,
+                "roundNumber" to roundNumber,
+                "payload" to mapOf("userId" to 42, "card" to "HEARTS_2"),
+            )
+        val frames = sendCommand(gameId, command, expectFrames = 2) // CONNECTED + the error MESSAGE
+
+        val errorFrame = frames.firstOrNull { it.contains("COMMAND_ERROR") }
+        assertTrue(errorFrame != null) { "expected a COMMAND_ERROR frame, got: $frames" }
+        assertTrue(errorFrame!!.contains("\"code\":\"not-player-turn\"")) { errorFrame }
+        assertTrue(errorFrame.contains("\"correlationId\":\"c-42\"")) { errorFrame }
+        assertTrue(errorFrame.startsWith("MESSAGE")) { "COMMAND_ERROR must be a MESSAGE frame, not: $errorFrame" }
+    }
+
+    // Sends CONNECT, SUBSCRIBE /topic/game/{id}, then the command, keeping the socket open for a fixed
+    // window so the async route (and any private COMMAND_ERROR reply) completes before close.
+    private fun sendCommand(
+        gameId: Int,
+        command: Map<String, Any>,
+        @Suppress("UNUSED_PARAMETER") expectFrames: Int,
+        client: ReactorNettyWebSocketClient = wsClient,
+    ): List<String> {
+        val connect = "CONNECT\naccept-version:1.1\nheart-beat:0,0\n\n "
+        val subscribe = "SUBSCRIBE\nid:sub-0\ndestination:/topic/game/$gameId\n\n "
+        val send = "SEND\ndestination:/app/command\ncontent-type:application/json\n\n${mapper.writeValueAsString(command)} "
         val uri = URI.create("ws://localhost:$gatewayPort/ws")
 
-        try {
-            wsClient
+        val received = mutableListOf<String>()
+        runCatching {
+            client
                 .execute(uri) { session ->
                     session
-                        .send(
-                            Flux.just(
-                                session.textMessage(connectFrame),
-                                session.textMessage(sendFrame),
-                            ),
-                        ).thenMany(
-                            // Just consume some frames (we don't care about responses for this test)
+                        .send(Flux.just(session.textMessage(connect), session.textMessage(subscribe), session.textMessage(send)))
+                        .thenMany(
                             session
                                 .receive()
                                 .map(WebSocketMessage::getPayloadAsText)
-                                .take(2)
-                                .timeout(Duration.ofSeconds(2))
-                                .onErrorResume { Flux.empty() }, // Ignore timeout errors
+                                .doOnNext { received.add(it) }
+                                // Collect for a fixed window (not a frame count), so a fire-and-forget
+                                // command's async backend call runs before the socket closes.
+                                .take(Duration.ofSeconds(2))
+                                .then(),
                         ).then()
-                }.block(Duration.ofSeconds(5))
-        } catch (e: Exception) {
-            // Ignore WebSocket errors - we only care about backend calls
+                }.block(Duration.ofSeconds(6))
         }
-
-        // Wait a bit for async processing
-        Thread.sleep(500)
-
-        // VERIFY: Backend was called to fetch encryption key
-        wireMock.verify(
-            getRequestedFor(urlMatching("/api/games/$gameId")),
-        )
-
-        // VERIFY: Backend was called with game command
-        // THIS IS THE IMPORTANT PART - Verify the WebSocket message was:
-        // 1. Received by gateway ✅
-        // 2. Decrypted correctly ✅
-        // 3. Routed to backend API ✅
-        // 4. With correct endpoint, headers, and body ✅
-
-        wireMock.verify(
-            postRequestedFor(urlEqualTo("/api/games/$gameId/commands"))
-                .withHeader("X-Gateway-Request", equalTo("true"))
-                .withRequestBody(matchingJsonPath("$.type", equalTo("MOVE_CONFIRM")))
-                .withRequestBody(matchingJsonPath("$.userId", equalTo("$userId")))
-                .withRequestBody(matchingJsonPath("$.moveIndex", equalTo("$moveIndex")))
-                .withRequestBody(matchingJsonPath("$.indices[0]", equalTo("0")))
-                .withRequestBody(matchingJsonPath("$.indices[1]", equalTo("1")))
-                .withRequestBody(matchingJsonPath("$.indices[2]", equalTo("2"))),
-        )
-    }
-
-    @Test
-    fun `WebSocket client sends EXIT and gateway routes correctly`() {
-        val gameId = 200
-        val userId = 99
-        val authToken = "Bearer exit-token"
-
-        val gameMessage =
-            mapOf(
-                "type" to "FAST_EXIT",
-                "gameId" to gameId,
-                "senderUserId" to userId,
-            )
-
-        sendGameMessageViaWebSocket(gameId, gameMessage, authToken)
-
-        Thread.sleep(500)
-
-        wireMock.verify(
-            getRequestedFor(urlMatching("/api/games/$gameId")),
-        )
-
-        wireMock.verify(
-            postRequestedFor(urlEqualTo("/api/games/$gameId/commands"))
-                .withHeader("X-Gateway-Request", equalTo("true"))
-                .withRequestBody(matchingJsonPath("$.type", equalTo("FAST_EXIT")))
-                .withRequestBody(matchingJsonPath("$.userId", equalTo("$userId"))),
-        )
-    }
-
-    @Test
-    fun `WebSocket client sends GET_HINT with moveIndex`() {
-        val gameId = 300
-        val moveIndex = 10
-        val userId = 77
-
-        val gameMessage =
-            mapOf(
-                "type" to "GET_HINT",
-                "gameId" to gameId,
-                "senderUserId" to userId,
-                "moveDto" to mapOf("moveIndex" to moveIndex),
-            )
-
-        sendGameMessageViaWebSocket(gameId, gameMessage, "Bearer hint-token")
-
-        Thread.sleep(500)
-
-        wireMock.verify(
-            postRequestedFor(urlEqualTo("/api/games/$gameId/commands"))
-                .withRequestBody(matchingJsonPath("$.type", equalTo("GET_HINT")))
-                .withRequestBody(matchingJsonPath("$.moveIndex", equalTo("$moveIndex"))),
-        )
-    }
-
-    // =========================================================================
-    // Helper Methods
-    // =========================================================================
-
-    private fun sendGameMessageViaWebSocket(
-        gameId: Int,
-        gameMessage: Map<String, Any>,
-        authToken: String,
-    ) {
-        val encryptedData = encrypt(mapper.writeValueAsString(gameMessage))
-        val outerMessage =
-            mapOf(
-                "gameId" to gameId,
-                "encryptedData" to encryptedData,
-            )
-
-        // Raw STOMP frames (no SockJS wrapping)
-        val connectFrame = "CONNECT\naccept-version:1.1\nheart-beat:10000,10000\n\n\u0000"
-        val sendFrame =
-            "SEND\ndestination:/app/game.sendMessage\n" +
-                "content-type:application/json;charset=UTF-8\n\n" +
-                "${mapper.writeValueAsString(outerMessage)}\u0000"
-
-        val uri = URI.create("ws://localhost:$gatewayPort/ws")
-
-        try {
-            wsClient
-                .execute(uri) { session ->
-                    session
-                        .send(
-                            Flux.just(
-                                session.textMessage(connectFrame),
-                                session.textMessage(sendFrame),
-                            ),
-                        ).thenMany(
-                            session
-                                .receive()
-                                .take(2)
-                                .timeout(Duration.ofSeconds(2))
-                                .onErrorResume { Flux.empty() },
-                        ).then()
-                }.block(Duration.ofSeconds(5))
-        } catch (e: Exception) {
-            // Ignore - we only verify backend calls
-        }
-    }
-
-    private fun encrypt(plaintext: String): String {
-        val keySpec = DESedeKeySpec(testEncryptionKey)
-        val keyFactory = SecretKeyFactory.getInstance("DESede")
-        val secretKey = keyFactory.generateSecret(keySpec)
-
-        val cipher = Cipher.getInstance("DESede/ECB/PKCS5Padding")
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-
-        val encrypted = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        return Base64.getEncoder().encodeToString(encrypted)
+        return received
     }
 }

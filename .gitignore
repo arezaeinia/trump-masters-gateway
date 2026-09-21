@@ -1,1 +1,5 @@
 /.idea/
+
+# Build output and logs
+/target/
+/logs/
